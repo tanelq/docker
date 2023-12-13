@@ -1,0 +1,151 @@
+FROM debian:bullseye
+
+ENV DEBIAN_FRONTEND noninteractive
+
+RUN apt-get update
+RUN apt-get dist-upgrade -y
+RUN apt-get install -y build-essential
+RUN apt-get install -y curl
+
+COPY ["./EDFCorpRootCA.crt", "/usr/local/share/ca-certificates/edf/EDFCorpRootCA.crt"]
+COPY ["./EDFCorpSubCA.crt", "/usr/local/share/ca-certificates/edf/EDFCorpSubCA.crt"]
+
+RUN update-ca-certificates
+
+RUN mkdir /src
+WORKDIR /src
+RUN curl -O https://ftp.gnu.org/gnu/gnu-keyring.gpg
+RUN gpg --import gnu-keyring.gpg
+
+RUN curl --location -O https://ftpmirror.gnu.org/binutils/binutils-2.36.tar.xz\
+ && curl --location -O https://ftpmirror.gnu.org/binutils/binutils-2.36.tar.xz.sig\
+ && gpg --verify-files binutils-2.36.tar.xz.sig
+
+RUN curl --location -O https://ftpmirror.gnu.org/gcc/gcc-11.1.0/gcc-11.1.0.tar.xz\
+ && curl --location -O https://ftpmirror.gnu.org/gcc/gcc-11.1.0/gcc-11.1.0.tar.xz.sig\
+ && gpg --verify-files gcc-11.1.0.tar.xz.sig
+
+RUN curl --location -O https://musl.libc.org/musl.pub
+RUN gpg --import musl.pub
+
+RUN curl --location -O https://musl.libc.org/releases/musl-1.2.2.tar.gz\
+ && curl --location -O https://musl.libc.org/releases/musl-1.2.2.tar.gz.asc\
+ && gpg --verify-files musl-1.2.2.tar.gz.asc
+
+
+COPY linux-headers-4.19.88.tar.xz.sha512sum .
+RUN curl --location -O https://ftp.barfooze.de/pub/sabotage/tarballs/linux-headers-4.19.88.tar.xz && sha512sum -c linux-headers-4.19.88.tar.xz.sha512sum
+
+RUN tar xf binutils-2.36.tar.xz && rm binutils-2.36.tar.xz
+RUN tar xf gcc-11.1.0.tar.xz && rm gcc-11.1.0.tar.xz
+RUN tar xf musl-1.2.2.tar.gz && rm musl-1.2.2.tar.gz
+RUN tar xf linux-headers-4.19.88.tar.xz && rm linux-headers-4.19.88.tar.xz
+
+RUN apt-get install -y libmpfr-dev libgmp-dev libmpc-dev libisl-dev
+
+RUN mkdir -p /opt/toolchains/x86_64-cybcom-linux-musl
+RUN mkdir /build
+
+ENV MAKEFLAGS -j12
+
+RUN mkdir /build/binutils
+WORKDIR /build/binutils
+RUN /src/binutils-2.36/configure\
+ --prefix=/opt/toolchains/x86_64-cybcom-linux-musl\
+ --target=x86_64-cybcom-linux-musl\
+ --with-sysroot=/opt/toolchains/x86_64-cybcom-linux-musl\
+ --disable-multilib
+RUN make $MAKEFLAGS
+RUN make install
+
+WORKDIR /src/linux-headers-4.19.88
+RUN make ARCH=x86_64 INSTALL_HDR_PATH=/opt/toolchains/x86_64-cybcom-linux-musl headers_install
+
+RUN mkdir /build/gcc
+WORKDIR /build/gcc
+RUN /src/gcc-11.1.0/configure\
+ --prefix=/opt/toolchains/x86_64-cybcom-linux-musl\
+ --target=x86_64-cybcom-linux-musl\
+ --enable-languages=c,c++\
+ --disable-multilib\
+ --with-static-standard-libraries\
+ --with-native-system-header-dir=/include\
+ --with-sysroot=/opt/toolchains/x86_64-cybcom-linux-musl
+RUN make $MAKEFLAGS all-gcc
+RUN make $MAKEFLAGS install-gcc
+
+ENV PATH="/opt/toolchains/x86_64-cybcom-linux-musl/bin:${PATH}"
+
+RUN mkdir /build/musl
+WORKDIR /build/musl
+RUN CFLAGS=-fPIC\ -fPIE /src/musl-1.2.2/configure --prefix=/opt/toolchains/x86_64-cybcom-linux-musl --target=x86_64-cybcom-linux-musl --disable-shared --disable-wrapper
+RUN make $MAKEFLAGS
+RUN make install
+#RUN ln -s /opt/toolchains/x86_64-cybcom-linux-musl/include /opt/toolchains/x86_64-cybcom-linux-musl/x86_64-cybcom-linux-musl/include
+
+WORKDIR /build/gcc
+RUN make $MAKEFLAGS all-target-libgcc
+RUN make $MAKEFLAGS install-target-libgcc
+
+WORKDIR /build/gcc
+RUN make $MAKEFLAGS all-target-libstdc++-v3
+RUN make $MAKEFLAGS install-target-libstdc++-v3
+
+############################# real container #############################
+
+FROM debian:bullseye
+
+ENV DEBIAN_FRONTEND noninteractive
+
+RUN apt-get update
+RUN apt-get dist-upgrade -y
+RUN apt-get install -y build-essential
+RUN apt-get install -y curl
+
+COPY ["./EDFCorpRootCA.crt", "/usr/local/share/ca-certificates/edf/EDFCorpRootCA.crt"]
+COPY ["./EDFCorpSubCA.crt", "/usr/local/share/ca-certificates/edf/EDFCorpSubCA.crt"]
+
+RUN update-ca-certificates
+
+# install our x86_64-cybcom-linux-musl toolchain
+
+COPY --from=0 /opt/toolchains /opt/toolchains
+ENV PATH="/opt/toolchains/x86_64-cybcom-linux-musl/bin:${PATH}"
+RUN apt-get install -y libmpfr-dev libgmp-dev libmpc-dev libisl-dev
+
+COPY wrapper.c install_wrapper.sh ./
+RUN x86_64-cybcom-linux-musl-gcc -static-pie -fPIE -Os wrapper.c -o wrapper
+RUN ./install_wrapper.sh x86_64-cybcom-linux-musl
+
+# install rust toolchain
+
+WORKDIR /root
+
+ENV RUSTUP_HOME /usr/local/rust
+ENV CARGO_HOME /usr/local/cargo
+RUN umask 000 && mkdir -p /usr/local/rust /usr/local/cargo
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o rustup.sh
+RUN umask 000 && sh ./rustup.sh\
+    -y\
+    --default-toolchain nightly-x86_64-unknown-linux-gnu\
+    --profile minimal
+ENV PATH="/usr/local/cargo/bin:${PATH}"
+RUN umask 000 && rustup target add x86_64-unknown-linux-musl
+
+COPY config /usr/local/cargo/config
+
+ENV TARGET_CC=x86_64-cybcom-linux-musl-gcc
+
+# install golang toolchain
+
+RUN curl --proto '=https' --location https://golang.org/dl/go1.16.5.linux-amd64.tar.gz | tar -C /usr/local -xz
+ENV PATH="/usr/local/go/bin:${PATH}"
+
+# install mingw-w64 toolchain
+
+RUN apt-get install -y mingw-w64
+
+# save our current env vars, because Azure Pipelines fucks it up
+
+RUN export > /env.sh && chmod 644 /env.sh
