@@ -1,0 +1,38 @@
+FROM redhat/ubi9:latest as builder
+
+RUN dnf install -y gcc make libicu-devel zlib-devel
+
+RUN mkdir -p /src
+
+COPY ./postgresql-16.2.tar.gz /src/postgresql-16.2.tar.gz
+
+WORKDIR /src
+
+RUN tar xf postgresql-16.2.tar.gz
+
+WORKDIR postgresql-16.2
+
+RUN ./configure --without-readline --bindir=/usr/sbin
+RUN make all
+RUN make install
+
+RUN adduser postgres
+
+RUN mkdir -p /usr/local/pgsql/data
+
+RUN mkdir -p /var/run/postgresql
+
+RUN mkdir -p /docker-entrypoint-initdb.d/
+
+RUN chown postgres:postgres /var/run/postgresql
+
+RUN chown -R postgres:postgres /usr/local/pgsql/data
+
+COPY ./docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
+USER postgres
+
+ENTRYPOINT ["/docker-entrypoint.sh","-h","0.0.0.0"]
+
+EXPOSE 5432
