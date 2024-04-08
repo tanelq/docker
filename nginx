@@ -1,0 +1,135 @@
+ARG BASE
+FROM ${BASE} as builder
+
+LABEL stage=build
+
+#### Make microdnf work
+RUN rm -rf /etc/yum.repos.d/ubi.repo
+RUN mkdir -p /etc/rhsm/ca
+COPY ./certs_etc/redhat.repo /etc/yum.repos.d/ubi.repo
+COPY ./certs_etc/RPM-GPG-KEY-redhat-release /etc/pki/rpm-gpg/RPM-GPG-KEY-redhat-release
+COPY ./certs_etc/katello-server-ca.pem /etc/rhsm/ca/katello-server-ca.pem
+COPY ./certs_etc/*.pem /etc/pki/entitlement/
+
+### Installing some packages that are needed for various actions
+RUN microdnf install tar gcc glibc-static autoconf automake libtool make pkg-config perl python3 gawk lld-devel gcc-c++ -y
+
+ARG NGINX_VERSION
+
+### Copying source files
+RUN mkdir /src
+COPY ./src/ /src/
+WORKDIR /src
+
+### Extracting resources
+RUN tar xf pcre2-10.42.tar.gz
+RUN tar xf zlib-1.3.tar.gz
+RUN tar xf openssl-1.1.1w.tar.gz
+RUN tar xf nginx-${NGINX_VERSION}.tar.gz
+
+WORKDIR /src/nginx-${NGINX_VERSION}
+
+### To hide server header
+RUN sed -i 's/"Server: nginx"/"Server: "/' ./src/http/ngx_http_header_filter_module.c
+RUN sed -i 's/"NGINX_VER CRLF"/"CRLF"/' ./src/http/ngx_http_header_filter_module.c
+RUN sed -i 's/"NGINX_VER_BUILD CRLF"/"CRLF/' ./src/http/ngx_http_header_filter_module.c
+
+### Compiling nginx binary
+RUN ./configure --sbin-path=/usr/sbin/nginx \
+	--modules-path=/usr/lib/nginx/modules \
+	--conf-path=/etc/nginx/nginx.conf \
+	--error-log-path=/var/log/nginx/error.log \
+	--http-log-path=/var/log/nginx/access.log \
+	--pid-path=/var/run/nginx.pid \
+	--lock-path=/var/run/nginx.lock \
+	--http-client-body-temp-path=/var/cache/nginx/client_temp \
+	--prefix=/etc/nginx \
+	--user=nobody \
+	--group=nobody \
+	--with-http_ssl_module \
+	--with-http_v2_module \
+	--with-http_realip_module \
+	--without-select_module \
+	--without-poll_module \
+	--without-http_charset_module \
+	--without-http_gzip_module \
+	--without-http_ssi_module \
+	--without-http_auth_basic_module \
+	--without-http_mirror_module \ 
+	--without-http_autoindex_module \
+	--without-http_geo_module \
+	--without-http_split_clients_module \
+	--without-http_referer_module \
+	--without-http_fastcgi_module \
+	--without-http_uwsgi_module \
+	--without-http_scgi_module \
+	--without-http_grpc_module \
+	--without-http_memcached_module \
+	--without-http_limit_conn_module \
+	--without-http_empty_gif_module \
+	--without-http_browser_module \
+	--without-http_upstream_hash_module \
+	--without-http_upstream_ip_hash_module \
+	--without-http_upstream_least_conn_module \
+	--without-http_upstream_random_module \
+	--without-http_upstream_keepalive_module \
+	--without-http_upstream_zone_module \
+	--without-mail_pop3_module \
+	--without-mail_imap_module \
+	--without-mail_smtp_module \
+	--without-stream_limit_conn_module \
+	--without-stream_access_module \
+	--without-stream_geo_module \
+	--without-stream_map_module \
+	--without-stream_split_clients_module \
+	--without-stream_return_module \
+	--without-stream_set_module \
+	--without-stream_upstream_hash_module \
+	--without-stream_upstream_least_conn_module \
+	--without-stream_upstream_random_module \
+	--without-stream_upstream_zone_module \
+	--with-cc-opt='-static' \
+	--with-ld-opt='-static' \
+	--with-pcre=/src/pcre2-10.42 \
+	--with-zlib=/src/zlib-1.3 \
+	--with-openssl=/src/openssl-1.1.1w
+RUN make -j12
+### Added -i cause there is a conflict in make install process, caused by prefix being .
+RUN make install
+
+FROM ${BASE} as server
+
+#### Make microdnf work
+RUN rm -rf /etc/yum.repos.d/ubi.repo
+RUN mkdir -p /etc/rhsm/ca
+COPY ./certs_etc/redhat.repo /etc/yum.repos.d/ubi.repo
+COPY ./certs_etc/RPM-GPG-KEY-redhat-release /etc/pki/rpm-gpg/RPM-GPG-KEY-redhat-release
+COPY ./certs_etc/katello-server-ca.pem /etc/rhsm/ca/katello-server-ca.pem
+COPY ./certs_etc/*.pem /etc/pki/entitlement/
+### Install gettext for nginx conf templates
+RUN microdnf install gettext shadow-utils nano -y
+### Add nginx user
+RUN adduser --system --home /var/cache/nginx --shell /sbin/nologin --user-group nginx
+### Copy binary and conf
+COPY --from=builder /usr/sbin/nginx /usr/sbin/nginx
+COPY ./conf_nginx/ /etc/nginx/
+COPY ./html/* /usr/share/nginx/html/
+### Create directories
+RUN mkdir -p /var/log/nginx
+RUN mkdir -p /var/cache/nginx
+
+### Make logs show in container log
+RUN ln -sf /dev/stdout /var/log/nginx/access.log
+RUN ln -sf /dev/stderr /var/log/nginx/error.log
+
+### Permissions
+RUN chmod 750 /etc/nginx
+RUN chmod -R 640 /etc/nginx/*
+
+### Entrypoint
+COPY ./entrypoint/docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+HEALTHCHECK CMD curl -f localhost:${NGINX_PORT} || exit 1
+ENTRYPOINT ["/docker-entrypoint.sh"]
+### Startup
+CMD [ "/usr/sbin/nginx","-c","/etc/nginx/nginx.conf" ]
