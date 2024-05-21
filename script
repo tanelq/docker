@@ -1,0 +1,31 @@
+#!/bin/bash
+set -euxo pipefail
+
+mkdir -p ./src
+pushd ./src
+
+export NGINX_VERSION=${NGINX_VERSION}
+export DOWNLOAD_SERVER=${DOWNLOAD_SERVER}
+export BASE=${BASE}
+export JWT_IMAGE_NAME=${JWT_IMAGE_NAME}
+
+wget ${DOWNLOAD_SERVER}/nginx/pcre2-10.42.tar.gz -nc
+wget ${DOWNLOAD_SERVER}/nginx/zlib-1.3.tar.gz -nc
+wget ${DOWNLOAD_SERVER}/nginx/openssl-1.1.1w.tar.gz -nc
+wget ${DOWNLOAD_SERVER}/nginx/nginx-${NGINX_VERSION}.tar.gz -nc
+wget ${DOWNLOAD_SERVER}/nginx/jansson-2.14.tar.gz -nc
+wget ${DOWNLOAD_SERVER}/nginx/libjwt-1.15.3.tar.gz -nc
+wget ${DOWNLOAD_SERVER}/nginx/2.0.3.tar.gz -nc
+
+popd
+
+podman build -t ${JWT_IMAGE_NAME}:${NGINX_VERSION} -f Dockerfile.nginx-jwt --build-arg "NGINX_VERSION=${NGINX_VERSION}" --build-arg "BASE=${BASE}" . 
+
+mkdir -p bin
+podman create --name=copy-nginx-jwt-binary ${JWT_IMAGE_NAME}:${NGINX_VERSION}
+### Copy binary out from docker image
+podman cp copy-nginx-jwt-binary:/usr/sbin/nginx ./bin/nginx-jwt
+### Remove container
+podman rm copy-nginx-jwt-binary
+
+echo "Done, created podman image $JWT_IMAGE_NAME" 
